@@ -59,7 +59,7 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (d_model)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.d_model, dim=2)
+        q, k, v  = self.c_attn(x).split(self.config.d_resid, dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -154,7 +154,8 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.n_ctx is not None
         self.config = config
-        self.ce_weights = torch.ones(config.n_layer+1) // (config.n_layer+1)
+        self.ce_weights = torch.zeros(config.n_layer+1) 
+        self.ce_weights[-1] = 1.0
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.d_model),
@@ -206,7 +207,8 @@ class GPT(nn.Module):
         device = idx.device
         
         b, t = idx.size()
-        outputs = torch.empty(self.config.n_layer, b, t, self.config.d_vocab)
+        outputs = torch.empty(self.config.n_layer + 1, b, t, self.config.vocab_size).to(device)
+        self.ce_weights = self.ce_weights.to(device)
         
         assert t <= self.config.n_ctx, f"Cannot forward sequence of length {t}, block size is only {self.config.n_ctx}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
@@ -217,16 +219,16 @@ class GPT(nn.Module):
         outputs[0] = self.transformer.unembed(x)
         for i, block in enumerate(self.transformer.h):
             x = block(x)
-            outputs[i] = self.transformer.unembed(x)
+            outputs[i+1] = self.transformer.unembed(x)
 
 
         # TODO: move to training loop
         if targets is not None:
-            layer, batch, seq, d_vocab = outputs.shape
+            layer, batch, seq, vocab_size = outputs.shape
             target = targets[:, 1:]
             logits_except_last = outputs[:, :, :-1, :]
             logits_except_last = einops.rearrange(
-                logits_except_last, "layer batch seq d_vocab -> batch d_vocab layer seq"
+                logits_except_last, "layer batch seq vocab_size -> batch vocab_size layer seq"
             )
             target = einops.repeat(target, "batch seq -> batch layer seq", layer=layer)
             cross_entropies = F.cross_entropy(
@@ -236,15 +238,15 @@ class GPT(nn.Module):
                 cross_entropies, "batch layer seq -> layer batch seq"
             )
             losses_by_layer = cross_entropies.mean(dim=(-1,-2))
-            loss = einops.einsum(self.ce_weights, losses_by_layer, "layer, layer ->")
+            loss = einops.einsum(self.ce_weights, losses_by_layer, "layer, layer -> ")
             
+            # training
+            return outputs, loss
         else:
-            raise NotImplementedError("no targets provided")
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
+            # inference
+            return outputs[-1], None
 
-        return outputs, loss
+        
 
     def crop_n_ctx(self, n_ctx):
         # model surgery to decrease the block size if necessary
