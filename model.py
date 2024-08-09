@@ -205,7 +205,7 @@ class GPT(nn.Module):
         device = idx.device
         
         b, t = idx.size()
-        outputs = torch.empty(self.config.n_layer + 1, b, t, self.config.vocab_size).to(device)
+        outputs = []
         self.ce_weights = self.ce_weights.to(device)
         
         assert t <= self.config.n_ctx, f"Cannot forward sequence of length {t}, block size is only {self.config.n_ctx}"
@@ -214,10 +214,11 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, d_model)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, d_model)
         x = self.transformer.drop(tok_emb + pos_emb)
-        outputs[0] = self.transformer.unembed(x)
+        outputs.append(self.transformer.unembed(x))
         for i, block in enumerate(self.transformer.h):
             x = block(x)
-            outputs[i+1] = self.transformer.unembed(x)
+            outputs.append(self.transformer.unembed(x))
+        outputs = torch.stack(outputs, dim=0)
 
 
         # TODO: move to training loop
@@ -238,7 +239,7 @@ class GPT(nn.Module):
             return outputs, loss
         else:
             # inference
-            return outputs[1], None
+            return outputs[0], None
 
         
 
