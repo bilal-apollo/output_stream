@@ -146,7 +146,7 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-model_args = dict(n_layer=n_layer, n_head=n_head, d_model=d_model, d_output=d_output, use_output_stream = use_output_stream, n_ctx=n_ctx,
+model_args = dict(n_layer=n_layer, n_head=n_head, d_model=d_model, d_output=d_output, n_ctx=n_ctx,
             bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch

@@ -32,7 +32,7 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        assert config.d_model % config.n_head == 0
+        assert config.d_resid % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.d_resid, 3 * config.d_resid, bias=config.bias)
         # output projection
@@ -41,7 +41,6 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
-        self.d_model = config.d_model
         self.dropout = config.dropout
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
@@ -50,6 +49,7 @@ class CausalSelfAttention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.n_ctx, config.n_ctx))
                                         .view(1, 1, config.n_ctx, config.n_ctx))
+            
         self.ln_1 = LayerNorm(config.d_resid, bias=config.bias)
 
     def forward(self, x):
@@ -123,8 +123,7 @@ class GPTConfig:
     d_model: int = 1536
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    d_output: int = 768 
-    use_output_stream: bool = False
+    d_output: int = 768 # residual stream has shape d_model = d_resid + d_output 
     
     def __post_init__(self):
         self.d_resid = self.d_model - self.d_output
@@ -154,8 +153,7 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.n_ctx is not None
         self.config = config
-        self.ce_weights = torch.zeros(config.n_layer+1) 
-        self.ce_weights[-1] = 1.0
+        self.ce_weights = torch.ones(config.n_layer+1) / (config.n_layer+1) # cross entropy weights for each layer
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.d_model),
@@ -225,26 +223,22 @@ class GPT(nn.Module):
         # TODO: move to training loop
         if targets is not None:
             layer, batch, seq, vocab_size = outputs.shape
-            target = targets[:, 1:]
-            logits_except_last = outputs[:, :, :-1, :]
-            logits_except_last = einops.rearrange(
-                logits_except_last, "layer batch seq vocab_size -> batch vocab_size layer seq"
+            logits = einops.rearrange(
+                outputs, "layer batch seq vocab_size -> batch vocab_size layer seq"
             )
-            target = einops.repeat(target, "batch seq -> batch layer seq", layer=layer)
+            targets = einops.repeat(targets, "batch seq -> batch layer seq", layer=layer)
             cross_entropies = F.cross_entropy(
-                logits_except_last, target, reduction='none'
+                logits, targets, reduction='none'
             )
             cross_entropies = einops.rearrange(
                 cross_entropies, "batch layer seq -> layer batch seq"
             )
             losses_by_layer = cross_entropies.mean(dim=(-1,-2))
             loss = einops.einsum(self.ce_weights, losses_by_layer, "layer, layer -> ")
-            
-            # training
             return outputs, loss
         else:
             # inference
-            return outputs[-1], None
+            return outputs[1], None
 
         
 
